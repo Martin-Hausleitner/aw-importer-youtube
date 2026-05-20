@@ -22,10 +22,55 @@ const APP_DIR = path.join(os.homedir(), "Library", "Application Support", "aw-im
 const STATE_PATH = path.join(APP_DIR, "state.json");
 const METADATA_CACHE_PATH = path.join(APP_DIR, "youtube-metadata-cache.json");
 const LOG_DIR = path.join(os.homedir(), "Library", "Logs", "aw-importer-youtube");
+const SERVICE_LABEL = "io.activitywatch.aw-importer-youtube";
+const DEFAULT_CONFIG = {
+  baseUrl: DEFAULT_BASE_URL,
+  bucket: null,
+  lookbackDays: 14,
+  metadata: true,
+  metadataLimit: 50,
+  skipExisting: false,
+  browserHistoryRoots: [
+    "~/Library/Application Support/Google/Chrome",
+    "~/Library/Application Support/BraveSoftware/Brave-Browser",
+    "~/Library/Application Support/Comet",
+    "~/Library/Application Support/com.operasoftware.Opera",
+  ],
+  takeoutDirs: [
+    "~/Downloads",
+    "~/ActivityWatchImports",
+    "~/Library/CloudStorage/OneDrive-Personal/ActivityWatchImports",
+    "~/Library/Mobile Documents/com~apple~CloudDocs/ActivityWatchImports",
+  ],
+  privacy: {
+    description: true,
+    tags: true,
+    stats: true,
+    thumbnails: true,
+  },
+  service: {
+    intervalSeconds: 60,
+  },
+};
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const baseUrl = opts.baseUrl || process.env.AW_BASE_URL || DEFAULT_BASE_URL;
+  const opts = loadOptions(process.argv.slice(2));
+  if (opts.command === "doctor") {
+    await runDoctor(opts);
+    return;
+  }
+  if (opts.command === "install-service") {
+    installService(opts);
+    return;
+  }
+  if (opts.command === "backfill" && !opts.dryRun && !opts.confirm) {
+    throw new Error("Backfill writes many events. Re-run with --dry-run first, then add --confirm to write.");
+  }
+  await runSync(opts);
+}
+
+async function runSync(opts) {
+  const baseUrl = opts.baseUrl;
   const now = new Date();
   const since = opts.since ? new Date(opts.since) : new Date(now.getTime() - opts.lookbackDays * 24 * 3600 * 1000);
 
@@ -36,11 +81,11 @@ async function main() {
   const bucketId = opts.bucket || `aw-import-youtube-watch-sessions_${info.hostname || os.hostname()}`;
 
   const awEvents = await collectActivityWatchEvents(baseUrl, since, now);
-  const chromeEvents = collectChromeHistoryEvents(since);
-  const takeoutEvents = collectTakeoutEvents(since);
+  const chromeEvents = collectChromeHistoryEvents(since, opts.browserHistoryRoots);
+  const takeoutEvents = collectTakeoutEvents(since, opts.takeoutDirs);
   const candidates = dedupeEvents([...awEvents, ...chromeEvents, ...takeoutEvents]);
   const sessions = buildWatchSessions(candidates);
-  const enrichedSessions = opts.metadata ? enrichSessionsWithMetadata(sessions, opts.metadataLimit) : sessions;
+  const enrichedSessions = opts.metadata ? enrichSessionsWithMetadata(sessions, opts.metadataLimit, opts.privacy) : sessions.map((event) => applyPrivacy(event, opts.privacy));
   const existingByKey = opts.skipExisting ? new Map() : await existingSessionsByKey(baseUrl, bucketId, since, now);
   const replacements = [];
   const newEvents = [];
@@ -79,36 +124,55 @@ async function main() {
       chrome_history: chromeEvents.length,
       google_takeout: takeoutEvents.length,
     },
+    quality: qualityReport(enrichedSessions),
     metadata: {
       enabled: opts.metadata,
       cachePath: METADATA_CACHE_PATH,
       limit: opts.metadataLimit,
     },
+    configPath: opts.configPath || null,
   };
   fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
   process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
 }
 
+function loadOptions(args) {
+  const parsed = parseArgs(args);
+  const config = loadConfig(parsed.configPath);
+  const opts = mergeOptions(DEFAULT_CONFIG, config, parsed);
+  if (process.env.AW_BASE_URL && !parsed.baseUrl) opts.baseUrl = process.env.AW_BASE_URL;
+  opts.browserHistoryRoots = opts.browserHistoryRoots.map(expandHome);
+  opts.takeoutDirs = opts.takeoutDirs.map(expandHome);
+  return opts;
+}
+
 function parseArgs(args) {
-  const opts = {
-    lookbackDays: 14,
-    dryRun: false,
-    metadata: true,
-    metadataLimit: 50,
-    skipExisting: false,
-    takeoutDirs: [],
-  };
+  const opts = { command: "sync", dryRun: false, takeoutDirs: [], browserHistoryRoots: [] };
+  const commands = new Set(["sync", "backfill", "doctor", "install-service"]);
+  if (args[0] && commands.has(args[0])) opts.command = args.shift();
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === "--dry-run") opts.dryRun = true;
+    else if (arg === "--confirm" || arg === "--yes") opts.confirm = true;
     else if (arg === "--skip-existing") opts.skipExisting = true;
+    else if (arg === "--config") opts.configPath = args[++i];
     else if (arg === "--lookback-days") opts.lookbackDays = Number(args[++i]);
+    else if (arg === "--days") opts.lookbackDays = Number(args[++i]);
     else if (arg === "--since") opts.since = args[++i];
     else if (arg === "--base-url") opts.baseUrl = args[++i];
     else if (arg === "--bucket") opts.bucket = args[++i];
     else if (arg === "--takeout-dir") opts.takeoutDirs.push(args[++i]);
+    else if (arg === "--browser-history-root") opts.browserHistoryRoots.push(args[++i]);
     else if (arg === "--metadata-limit") opts.metadataLimit = Number(args[++i]);
     else if (arg === "--no-metadata") opts.metadata = false;
+    else if (arg === "--minimal-metadata") opts.privacy = { description: false, tags: false, stats: false, thumbnails: false };
+    else if (arg === "--no-description") opts.privacy = { ...(opts.privacy || {}), description: false };
+    else if (arg === "--no-tags") opts.privacy = { ...(opts.privacy || {}), tags: false };
+    else if (arg === "--no-stats") opts.privacy = { ...(opts.privacy || {}), stats: false };
+    else if (arg === "--no-thumbnails") opts.privacy = { ...(opts.privacy || {}), thumbnails: false };
+    else if (arg === "--interval-seconds") opts.service = { ...(opts.service || {}), intervalSeconds: Number(args[++i]) };
+    else if (arg === "--node-bin") opts.nodeBin = args[++i];
+    else if (arg === "--project-dir") opts.projectDir = args[++i];
     else if (arg === "--help") {
       printHelp();
       process.exit(0);
@@ -116,28 +180,202 @@ function parseArgs(args) {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
+  return opts;
+}
+
+function loadConfig(configPath) {
+  const candidates = configPath
+    ? [configPath]
+    : [
+        path.join(process.cwd(), "aw-importer-youtube.config.json"),
+        path.join(process.cwd(), "config.json"),
+        path.join(APP_DIR, "config.json"),
+      ];
+  for (const candidate of candidates) {
+    const fullPath = expandHome(candidate);
+    if (!fs.existsSync(fullPath)) continue;
+    try {
+      return { ...JSON.parse(fs.readFileSync(fullPath, "utf8")), configPath: fullPath };
+    } catch (error) {
+      throw new Error(`Could not read config ${fullPath}: ${error.message}`);
+    }
+  }
+  return {};
+}
+
+function mergeOptions(defaults, config, cli) {
+  const merged = {
+    ...defaults,
+    ...config,
+    ...cli,
+    privacy: {
+      ...defaults.privacy,
+      ...(config.privacy || {}),
+      ...(cli.privacy || {}),
+    },
+    service: {
+      ...defaults.service,
+      ...(config.service || {}),
+      ...(cli.service || {}),
+    },
+  };
+  if (cli.takeoutDirs?.length) merged.takeoutDirs = cli.takeoutDirs;
+  if (cli.browserHistoryRoots?.length) merged.browserHistoryRoots = cli.browserHistoryRoots;
+  validateOptions(merged);
+  return merged;
+}
+
+function validateOptions(opts) {
   if (!Number.isFinite(opts.lookbackDays) || opts.lookbackDays <= 0) {
     throw new Error("--lookback-days must be a positive number");
   }
   if (!Number.isFinite(opts.metadataLimit) || opts.metadataLimit < 0) {
     throw new Error("--metadata-limit must be a non-negative number");
   }
-  return opts;
+  if (!Number.isFinite(opts.service.intervalSeconds) || opts.service.intervalSeconds < 10) {
+    throw new Error("--interval-seconds must be at least 10");
+  }
+}
+
+function expandHome(value) {
+  if (!value) return value;
+  return String(value).replace(/^~(?=$|\/)/, os.homedir());
 }
 
 function printHelp() {
-  process.stdout.write(`Usage: node src/cli.mjs [options]
+  process.stdout.write(`Usage: node src/cli.mjs [command] [options]
+
+Commands:
+  sync             Import recent sessions (default)
+  backfill         Import a longer range; requires --dry-run or --confirm
+  doctor           Check ActivityWatch, local tools, and readable sources
+  install-service  Install/update the macOS LaunchAgent
 
 Options:
+  --config PATH      Read JSON config (default: ./aw-importer-youtube.config.json if present)
   --lookback-days N   Import the last N days (default: 14)
+  --days N          Alias for --lookback-days
   --since ISO         Import from an explicit timestamp
   --dry-run           Print counts without writing ActivityWatch events
+  --confirm          Allow backfill writes
   --base-url URL      ActivityWatch API base URL
   --bucket ID         Destination ActivityWatch bucket
+  --browser-history-root DIR  Add/override a Chromium-style history root
+  --takeout-dir DIR   Add/override a Google Takeout search root
   --metadata-limit N  Fetch metadata for up to N uncached videos per run (default: 50)
   --no-metadata       Skip yt-dlp metadata enrichment
+  --minimal-metadata  Store title, URL, IDs, timing, and channel basics only
+  --no-description    Do not store video descriptions
+  --no-tags           Do not store tags/categories/chapters/caption languages
+  --no-stats          Do not store view/like/comment/rating stats
+  --no-thumbnails     Do not store thumbnails
   --skip-existing     Do not fetch existing destination events before insert
+  --interval-seconds N  LaunchAgent interval for install-service
+  --node-bin PATH     Node binary for install-service
+  --project-dir PATH  Project directory for install-service
 `);
+}
+
+async function runDoctor(opts) {
+  const checks = [];
+  checks.push(await checkActivityWatch(opts.baseUrl));
+  checks.push(checkExecutable("sqlite3"));
+  checks.push(checkExecutable("yt-dlp", opts.metadata ? "required for metadata enrichment" : "optional because metadata is disabled"));
+  const browserHistoryFiles = findBrowserHistoryFiles(opts.browserHistoryRoots);
+  const takeoutFiles = findTakeoutHistoryFiles(opts.takeoutDirs);
+  checks.push({
+    name: "browser_history",
+    ok: true,
+    detail: `${browserHistoryFiles.length} History file(s) found`,
+  });
+  checks.push({
+    name: "google_takeout",
+    ok: true,
+    detail: `${takeoutFiles.length} youtube-watch-history.json file(s) found`,
+  });
+  const report = {
+    ok: checks.every((check) => check.ok),
+    checks,
+    configPath: opts.configPath || null,
+    statePath: STATE_PATH,
+    metadataCachePath: METADATA_CACHE_PATH,
+  };
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (!report.ok) process.exitCode = 1;
+}
+
+async function checkActivityWatch(baseUrl) {
+  try {
+    const info = await awGet(baseUrl, "/info");
+    return { name: "activitywatch", ok: true, detail: `reachable at ${baseUrl}`, hostname: info.hostname };
+  } catch (error) {
+    return { name: "activitywatch", ok: false, detail: error.message };
+  }
+}
+
+function checkExecutable(name, note = "") {
+  try {
+    execFileSync(name, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+    return { name, ok: true, detail: note || "available" };
+  } catch {
+    return { name, ok: false, detail: note || "not available on PATH" };
+  }
+}
+
+function installService(opts) {
+  const nodeBin = opts.nodeBin || process.execPath;
+  const projectDir = path.resolve(expandHome(opts.projectDir || process.cwd()));
+  const launchAgentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
+  const plistPath = path.join(launchAgentsDir, `${SERVICE_LABEL}.plist`);
+  const logDir = path.join(os.homedir(), "Library", "Logs", "aw-importer-youtube");
+  const configArgs = opts.configPath ? `\n    <string>--config</string>\n    <string>${escapeXml(opts.configPath)}</string>` : "";
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${SERVICE_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escapeXml(nodeBin)}</string>
+    <string>${escapeXml(path.join(projectDir, "src", "cli.mjs"))}</string>
+    <string>sync</string>${configArgs}
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(projectDir)}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>${Math.round(opts.service.intervalSeconds)}</integer>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(path.join(logDir, "launchd.out.log"))}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(path.join(logDir, "launchd.err.log"))}</string>
+</dict>
+</plist>
+`;
+  if (opts.dryRun) {
+    process.stdout.write(`${JSON.stringify({ installed: false, dryRun: true, label: SERVICE_LABEL, plistPath, intervalSeconds: opts.service.intervalSeconds, plist }, null, 2)}\n`);
+    return;
+  }
+  fs.mkdirSync(launchAgentsDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(plistPath, plist);
+  try {
+    execFileSync("launchctl", ["bootout", `gui/${process.getuid()}`, plistPath], { stdio: "ignore" });
+  } catch {
+    // Service may not be loaded yet.
+  }
+  execFileSync("launchctl", ["bootstrap", `gui/${process.getuid()}`, plistPath], { stdio: "inherit" });
+  process.stdout.write(`${JSON.stringify({ installed: true, label: SERVICE_LABEL, plistPath, intervalSeconds: opts.service.intervalSeconds }, null, 2)}\n`);
+}
+
+function escapeXml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 async function collectActivityWatchEvents(baseUrl, since, now) {
@@ -155,8 +393,8 @@ async function collectActivityWatchEvents(baseUrl, since, now) {
   return out;
 }
 
-function collectChromeHistoryEvents(since) {
-  const histories = findBrowserHistoryFiles();
+function collectChromeHistoryEvents(since, browserHistoryRoots) {
+  const histories = findBrowserHistoryFiles(browserHistoryRoots);
   const out = [];
   for (const historyPath of histories) {
     for (const row of readHistoryRows(historyPath)) {
@@ -167,13 +405,7 @@ function collectChromeHistoryEvents(since) {
   return filterEventsSince(out, since);
 }
 
-function findBrowserHistoryFiles() {
-  const roots = [
-    path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome"),
-    path.join(os.homedir(), "Library", "Application Support", "BraveSoftware", "Brave-Browser"),
-    path.join(os.homedir(), "Library", "Application Support", "Comet"),
-    path.join(os.homedir(), "Library", "Application Support", "com.operasoftware.Opera"),
-  ];
+function findBrowserHistoryFiles(roots = DEFAULT_CONFIG.browserHistoryRoots.map(expandHome)) {
   const files = [];
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
@@ -206,8 +438,8 @@ function readHistoryRows(historyPath) {
   }
 }
 
-function collectTakeoutEvents(since) {
-  const files = findTakeoutHistoryFiles();
+function collectTakeoutEvents(since, takeoutDirs) {
+  const files = findTakeoutHistoryFiles(takeoutDirs);
   const out = [];
   for (const file of files) {
     try {
@@ -224,13 +456,7 @@ function collectTakeoutEvents(since) {
   return filterEventsSince(out, since);
 }
 
-function findTakeoutHistoryFiles() {
-  const roots = [
-    path.join(os.homedir(), "Downloads"),
-    path.join(os.homedir(), "ActivityWatchImports"),
-    path.join(os.homedir(), "Library", "CloudStorage", "OneDrive-Personal", "ActivityWatchImports"),
-    path.join(os.homedir(), "Library", "Mobile Documents", "com~apple~CloudDocs", "ActivityWatchImports"),
-  ];
+function findTakeoutHistoryFiles(roots = DEFAULT_CONFIG.takeoutDirs.map(expandHome)) {
   const files = [];
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
@@ -288,7 +514,7 @@ async function deleteEvent(baseUrl, bucketId, eventId) {
   }
 }
 
-function enrichSessionsWithMetadata(sessions, metadataLimit) {
+function enrichSessionsWithMetadata(sessions, metadataLimit, privacy) {
   const cache = loadMetadataCache();
   let fetched = 0;
   const enriched = sessions.map((session) => {
@@ -303,10 +529,46 @@ function enrichSessionsWithMetadata(sessions, metadataLimit) {
         cache[videoId] = metadata;
       }
     }
-    return metadata ? applyVideoMetadata(session, metadata) : session;
+    return applyPrivacy(metadata ? applyVideoMetadata(session, metadata) : session, privacy);
   });
   saveMetadataCache(cache);
   return enriched;
+}
+
+function applyPrivacy(event, privacy) {
+  const data = { ...(event.data || {}) };
+  if (!privacy.description) delete data.description;
+  if (!privacy.tags) {
+    for (const key of ["categories", "tags", "chapters", "subtitle_languages", "automatic_caption_languages", "language"]) {
+      delete data[key];
+    }
+  }
+  if (!privacy.stats) {
+    for (const key of ["view_count", "like_count", "comment_count", "average_rating"]) {
+      delete data[key];
+    }
+  }
+  if (!privacy.thumbnails) {
+    for (const key of ["thumbnail", "thumbnails"]) {
+      delete data[key];
+    }
+  }
+  return { ...event, data };
+}
+
+function qualityReport(events) {
+  const total = events.length;
+  const count = (field) => events.filter((event) => event?.data?.[field] !== undefined && event?.data?.[field] !== null && event?.data?.[field] !== "").length;
+  const sumWatchSeconds = events.reduce((sum, event) => sum + Number(event?.data?.watch_seconds || event?.duration || 0), 0);
+  return {
+    total,
+    with_url: count("url"),
+    with_video_id: count("video_id"),
+    with_channel: count("channel"),
+    with_description: count("description"),
+    with_watch_minutes: count("watch_minutes"),
+    total_watch_minutes: Math.round((sumWatchSeconds / 60) * 100) / 100,
+  };
 }
 
 function loadMetadataCache() {

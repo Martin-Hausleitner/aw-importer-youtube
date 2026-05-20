@@ -3,6 +3,7 @@ node_modules/
 *.log
 
 # Local runtime state. These can contain personal watch history.
+aw-importer-youtube.config.json
 state.json
 youtube-metadata-cache.json
 *.tmp

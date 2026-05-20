@@ -106,11 +106,13 @@ export function eventFromChromeHistoryRow(row) {
   if (!videoId) return null;
   const title = normalizeYouTubeTitle(row.title);
   const timestamp = chromeTimeToIso(row.last_visit_time);
+  const sourceApp = sourceAppForProfile(row.profile);
   return {
     timestamp,
     duration: 1,
     data: {
       source: "chrome_history",
+      source_app: sourceApp,
       source_profile: row.profile || null,
       title,
       url: row.url,
@@ -359,6 +361,15 @@ function sourceAppForBucket(bucketId, data) {
   if (lower.includes("comet")) return "comet";
   if (lower.includes("opera")) return "opera";
   return "unknown";
+}
+
+function sourceAppForProfile(profile) {
+  const lower = String(profile || "").toLowerCase();
+  if (lower.includes("comet")) return "Comet";
+  if (lower.includes("bravesoftware") || lower.includes("brave-browser")) return "Brave Browser";
+  if (lower.includes("google/chrome") || lower.includes("chrome")) return "Google Chrome";
+  if (lower.includes("opera")) return "Opera";
+  return "Browser History";
 }
 
 function isBrowserApp(app) {

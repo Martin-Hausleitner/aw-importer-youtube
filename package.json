@@ -4,6 +4,9 @@
   "private": false,
   "type": "module",
   "scripts": {
+    "backfill": "node src/cli.mjs backfill",
+    "doctor": "node src/cli.mjs doctor",
+    "install-service": "node src/cli.mjs install-service",
     "test": "node --test",
     "sync": "node src/cli.mjs"
   }

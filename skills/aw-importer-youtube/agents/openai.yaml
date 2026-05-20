@@ -1,0 +1,7 @@
+interface:
+  display_name: "aw-importer-youtube"
+  short_description: "Install and operate YouTube ActivityWatch sync"
+  default_prompt: "Use $aw-importer-youtube to install, configure, test, or backfill the ActivityWatch YouTube importer."
+
+policy:
+  allow_implicit_invocation: true

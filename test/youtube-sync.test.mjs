@@ -112,7 +112,20 @@ test("eventFromChromeHistoryRow imports recent YouTube history as a marker event
   assert.equal(event.timestamp, "2019-11-05T18:58:20.000Z");
   assert.equal(event.duration, 1);
   assert.equal(event.data.source, "chrome_history");
+  assert.equal(event.data.source_app, "Google Chrome");
   assert.equal(event.data.title, "History Video");
+});
+
+test("eventFromChromeHistoryRow keeps Comet history separate from Chrome", () => {
+  const event = eventFromChromeHistoryRow({
+    url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    title: "Comet Video - YouTube",
+    last_visit_time: "13217453900000000",
+    profile: "Comet/Default",
+  });
+
+  assert.equal(event.data.source_app, "Comet");
+  assert.equal(event.data.source_profile, "Comet/Default");
 });
 
 test("eventFromTakeoutEntry converts Google Takeout watch history entries", () => {

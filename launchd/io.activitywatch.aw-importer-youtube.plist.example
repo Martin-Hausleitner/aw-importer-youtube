@@ -9,6 +9,7 @@
   <array>
     <string>__NODE_BIN__</string>
     <string>__PROJECT_DIR__/src/cli.mjs</string>
+    <string>sync</string>
     <string>--lookback-days</string>
     <string>14</string>
     <string>--metadata-limit</string>

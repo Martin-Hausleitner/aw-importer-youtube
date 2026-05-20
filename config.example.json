@@ -1,0 +1,29 @@
+{
+  "baseUrl": "http://127.0.0.1:5600/api/0",
+  "bucket": null,
+  "lookbackDays": 14,
+  "metadata": true,
+  "metadataLimit": 20,
+  "skipExisting": false,
+  "browserHistoryRoots": [
+    "~/Library/Application Support/Google/Chrome",
+    "~/Library/Application Support/BraveSoftware/Brave-Browser",
+    "~/Library/Application Support/Comet",
+    "~/Library/Application Support/com.operasoftware.Opera"
+  ],
+  "takeoutDirs": [
+    "~/Downloads",
+    "~/ActivityWatchImports",
+    "~/Library/CloudStorage/OneDrive-Personal/ActivityWatchImports",
+    "~/Library/Mobile Documents/com~apple~CloudDocs/ActivityWatchImports"
+  ],
+  "privacy": {
+    "description": true,
+    "tags": true,
+    "stats": true,
+    "thumbnails": true
+  },
+  "service": {
+    "intervalSeconds": 60
+  }
+}
