@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+*.log
+
+# Local runtime state. These can contain personal watch history.
+state.json
+youtube-metadata-cache.json
+*.tmp
+artifacts/
